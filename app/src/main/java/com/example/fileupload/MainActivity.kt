@@ -18,7 +18,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -111,7 +111,7 @@ fun TokenScreen(onSave: (String) -> Unit) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(Modifier.height(16.dp))
+        Spacer(modifier.height(16.dp))
         Button(
             onClick = { if (input.isNotBlank()) onSave(input) },
             modifier = Modifier.fillMaxWidth()
@@ -161,12 +161,12 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
                 }
             } else if (error != null) {
                 Column(
-                    Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                    modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(error!!, color = MaterialTheme.colorScheme.error)
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(modifier.height(16.dp))
                     Button(onClick = {
                         isLoadingRepos = true
                         error = null
@@ -182,7 +182,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
                     }) { Text("Повторить") }
                 }
             } else {
-                LazyColumn(Modifier.padding(padding)) {
+                LazyColumn(modifier = Modifier.padding(padding)) {
                     items(repos) { repo ->
                         ListItem(
                             headlineContent = { Text(repo.fullName) },
@@ -191,7 +191,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
                             },
                             modifier = Modifier.clickable { selectedRepo = repo }
                         )
-                        HorizontalDivider()
+                        Divider()
                     }
                 }
             }
@@ -230,14 +230,12 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    var basePath by remember { mutableStateOf("") } // prefix in repo, e.g. "docs" or empty
+    var basePath by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("Upload via Android app") }
 
-    // Single file mode
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
     var selectedFileName by remember { mutableStateOf<String?>(null) }
 
-    // Folder mode
     var selectedFolderUri by remember { mutableStateOf<Uri?>(null) }
     var folderFileCount by remember { mutableStateOf(0) }
 
@@ -261,18 +259,16 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
         if (uri != null) {
-            // Persist permission so we can read later
             try {
                 context.contentResolver.takePersistableUriPermission(
                     uri,
                     android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-            } catch (_: Exception) { /* already granted or not needed */ }
+            } catch (_: Exception) { }
 
             selectedFolderUri = uri
             selectedFileUri = null
             selectedFileName = null
-            // Count files
             scope.launch {
                 val files = withContext(Dispatchers.IO) {
                     collectFilesRecursive(context, uri)
@@ -295,7 +291,7 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
         }
     ) { padding ->
         Column(
-            Modifier
+            modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(16.dp)
@@ -314,22 +310,25 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(modifier.height(12.dp))
             OutlinedTextField(
                 value = message,
                 onValueChange = { message = it },
                 label = { Text("Commit message") },
                 modifier = Modifier.fillMaxWidth()
             )
-            Spacer(Modifier.height(16.dp))
+            Spacer(modifier.height(16.dp))
 
-            Row(Modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Button(
                     onClick = { filePicker.launch("*/*") },
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.AttachFile, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(modifier.width(4.dp))
                     Text("Файл")
                 }
                 Button(
@@ -337,12 +336,12 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.Folder, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(modifier.width(4.dp))
                     Text("Папка")
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(modifier.height(8.dp))
 
             when {
                 selectedFolderUri != null -> {
@@ -356,7 +355,7 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                 }
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(modifier.height(24.dp))
 
             Button(
                 onClick = {
@@ -381,7 +380,6 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                             val repoName = repo.name
 
                             if (hasFolder) {
-                                // === Folder upload ===
                                 progressText = "Сканирование папки..."
                                 val files = withContext(Dispatchers.IO) {
                                     collectFilesRecursive(context, selectedFolderUri!!)
@@ -391,7 +389,6 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                     return@launch
                                 }
 
-                                // Build operations (create only; for simplicity we don't check existing SHA)
                                 val operations = mutableListOf<ChangeFileOperation>()
                                 var processed = 0
                                 for ((relPath, uri) in files) {
@@ -415,7 +412,6 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                     )
                                 }
 
-                                // Upload in batches (API limit safety)
                                 val batchSize = 50
                                 var uploaded = 0
                                 for (batch in operations.chunked(batchSize)) {
@@ -439,7 +435,6 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                 Toast.makeText(context, "Папка загружена ($uploaded файлов)", Toast.LENGTH_LONG).show()
 
                             } else {
-                                // === Single file upload ===
                                 progressText = "Загрузка файла..."
                                 val bytes = withContext(Dispatchers.IO) {
                                     context.contentResolver.openInputStream(selectedFileUri!!)!!.use { it.readBytes() }
@@ -485,7 +480,7 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
             ) {
                 if (isUploading) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(modifier.width(8.dp))
                 }
                 Text(
                     when {
@@ -497,12 +492,12 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
             }
 
             progressText?.let {
-                Spacer(Modifier.height(12.dp))
+                Spacer(modifier.height(12.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall)
             }
 
             status?.let {
-                Spacer(Modifier.height(16.dp))
+                Spacer(modifier.height(16.dp))
                 Text(it, style = MaterialTheme.typography.bodyMedium)
             }
         }
