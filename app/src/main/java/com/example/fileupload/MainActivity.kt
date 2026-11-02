@@ -10,20 +10,57 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.modifier
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
-import com.example.fileupload.data.*
+import com.example.fileupload.data.ApiClient
+import com.example.fileupload.data.ChangeFileOperation
+import com.example.fileupload.data.ChangeFilesOptions
+import com.example.fileupload.data.CodebergApi
+import com.example.fileupload.data.CreateFileOptions
+import com.example.fileupload.data.Repository
+import com.example.fileupload.data.UpdateFileOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -57,7 +94,10 @@ fun App(tokenStore: TokenStore) {
     }
 
     if (isLoading) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
             CircularProgressIndicator()
         }
         return
@@ -97,12 +137,12 @@ fun TokenScreen(onSave: (String) -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("Codeberg FileUpload", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         Text(
             "Введите Personal Access Token\n(Settings → Applications на codeberg.org)",
             style = MaterialTheme.typography.bodyMedium
         )
-        Spacer(Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(24.dp))
         OutlinedTextField(
             value = input,
             onValueChange = { input = it },
@@ -111,7 +151,7 @@ fun TokenScreen(onSave: (String) -> Unit) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(16.dp))
         Button(
             onClick = { if (input.isNotBlank()) onSave(input) },
             modifier = Modifier.fillMaxWidth()
@@ -156,17 +196,23 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
             }
         ) { padding ->
             if (isLoadingRepos) {
-                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                    contentAlignment = Alignment.Center
+                ) {
                     CircularProgressIndicator()
                 }
             } else if (error != null) {
                 Column(
-                    modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(error!!, color = MaterialTheme.colorScheme.error)
-                    Spacer(modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = {
                         isLoadingRepos = true
                         error = null
@@ -179,7 +225,9 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
                                 isLoadingRepos = false
                             }
                         }
-                    }) { Text("Повторить") }
+                    }) {
+                        Text("Повторить")
+                    }
                 }
             } else {
                 LazyColumn(modifier = Modifier.padding(padding)) {
@@ -205,7 +253,6 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
     }
 }
 
-/** Recursively collect all files under a tree URI. Returns list of (relativePath, contentUri). */
 fun collectFilesRecursive(context: Context, treeUri: Uri): List<Pair<String, Uri>> {
     val result = mutableListOf<Pair<String, Uri>>()
     val root = DocumentFile.fromTreeUri(context, treeUri) ?: return result
@@ -264,7 +311,8 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                     uri,
                     android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
 
             selectedFolderUri = uri
             selectedFileUri = null
@@ -301,23 +349,24 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                 onValueChange = { basePath = it },
                 label = {
                     Text(
-                        if (selectedFolderUri != null)
+                        if (selectedFolderUri != null) {
                             "Базовый путь в репо (например docs/ или пусто)"
-                        else
+                        } else {
                             "Путь файла в репозитории"
+                        }
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
-            Spacer(modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             OutlinedTextField(
                 value = message,
                 onValueChange = { message = it },
                 label = { Text("Commit message") },
                 modifier = Modifier.fillMaxWidth()
             )
-            Spacer(modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -328,7 +377,7 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.AttachFile, contentDescription = null)
-                    Spacer(modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text("Файл")
                 }
                 Button(
@@ -336,12 +385,12 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.Folder, contentDescription = null)
-                    Spacer(modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text("Папка")
                 }
             }
 
-            Spacer(modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             when {
                 selectedFolderUri != null -> {
@@ -351,11 +400,14 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                     )
                 }
                 selectedFileName != null -> {
-                    Text("Выбран файл: $selectedFileName", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Выбран файл: $selectedFileName",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             }
 
-            Spacer(modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
             Button(
                 onClick = {
@@ -400,8 +452,11 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                     } ?: continue
 
                                     val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                                    val fullPath = if (basePath.isBlank()) relPath
-                                    else basePath.trimEnd('/') + "/" + relPath
+                                    val fullPath = if (basePath.isBlank()) {
+                                        relPath
+                                    } else {
+                                        basePath.trimEnd('/') + "/" + relPath
+                                    }
 
                                     operations.add(
                                         ChangeFileOperation(
@@ -415,29 +470,38 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                 val batchSize = 50
                                 var uploaded = 0
                                 for (batch in operations.chunked(batchSize)) {
-                                    progressText = "Загрузка ${uploaded + 1}–${uploaded + batch.size} / ${operations.size}"
+                                    progressText =
+                                        "Загрузка ${uploaded + 1}–${uploaded + batch.size} / ${operations.size}"
                                     val response = api.changeFiles(
-                                        owner, repoName,
+                                        owner,
+                                        repoName,
                                         ChangeFilesOptions(
                                             files = batch,
-                                            message = message.ifBlank { "Upload folder (${batch.size} files)" }
+                                            message = message.ifBlank {
+                                                "Upload folder (${batch.size} files)"
+                                            }
                                         )
                                     )
                                     if (!response.isSuccessful) {
                                         val err = response.errorBody()?.string()
-                                        status = "Ошибка ${response.code()} на файлах ${uploaded + 1}+ : $err"
+                                        status =
+                                            "Ошибка ${response.code()} на файлах ${uploaded + 1}+ : $err"
                                         return@launch
                                     }
                                     uploaded += batch.size
                                 }
 
                                 status = "Успешно загружено $uploaded файл(ов) из папки"
-                                Toast.makeText(context, "Папка загружена ($uploaded файлов)", Toast.LENGTH_LONG).show()
-
+                                Toast.makeText(
+                                    context,
+                                    "Папка загружена ($uploaded файлов)",
+                                    Toast.LENGTH_LONG
+                                ).show()
                             } else {
                                 progressText = "Загрузка файла..."
                                 val bytes = withContext(Dispatchers.IO) {
-                                    context.contentResolver.openInputStream(selectedFileUri!!)!!.use { it.readBytes() }
+                                    context.contentResolver.openInputStream(selectedFileUri!!)!!
+                                        .use { it.readBytes() }
                                 }
                                 val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
                                 val path = basePath
@@ -445,26 +509,43 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                 var existingSha: String? = null
                                 try {
                                     val existing = api.getContents(owner, repoName, path)
-                                    if (existing.type == "file") existingSha = existing.sha
-                                } catch (_: Exception) { }
+                                    if (existing.type == "file") {
+                                        existingSha = existing.sha
+                                    }
+                                } catch (_: Exception) {
+                                }
 
                                 val response = if (existingSha != null) {
                                     api.updateFile(
-                                        owner, repoName, path,
-                                        UpdateFileOptions(content = base64, sha = existingSha, message = message.ifBlank { null })
+                                        owner,
+                                        repoName,
+                                        path,
+                                        UpdateFileOptions(
+                                            content = base64,
+                                            sha = existingSha,
+                                            message = message.ifBlank { null }
+                                        )
                                     )
                                 } else {
                                     api.createFile(
-                                        owner, repoName, path,
-                                        CreateFileOptions(content = base64, message = message.ifBlank { null })
+                                        owner,
+                                        repoName,
+                                        path,
+                                        CreateFileOptions(
+                                            content = base64,
+                                            message = message.ifBlank { null }
+                                        )
                                     )
                                 }
 
                                 if (response.isSuccessful) {
-                                    status = "Успешно загружено!\n${response.body()?.content?.htmlUrl ?: ""}"
-                                    Toast.makeText(context, "Файл загружен", Toast.LENGTH_SHORT).show()
+                                    status =
+                                        "Успешно загружено!\n${response.body()?.content?.htmlUrl ?: ""}"
+                                    Toast.makeText(context, "Файл загружен", Toast.LENGTH_SHORT)
+                                        .show()
                                 } else {
-                                    status = "Ошибка ${response.code()}: ${response.errorBody()?.string()}"
+                                    status =
+                                        "Ошибка ${response.code()}: ${response.errorBody()?.string()}"
                                 }
                             }
                         } catch (e: Exception) {
@@ -479,8 +560,11 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (isUploading) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Spacer(modifier.width(8.dp))
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                 }
                 Text(
                     when {
@@ -492,12 +576,12 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
             }
 
             progressText?.let {
-                Spacer(modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(12.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall)
             }
 
             status?.let {
-                Spacer(modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 Text(it, style = MaterialTheme.typography.bodyMedium)
             }
         }
