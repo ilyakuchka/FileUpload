@@ -1,5 +1,6 @@
 package com.example.fileupload
 
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
@@ -21,11 +22,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.lifecycleScope
+import androidx.documentfile.provider.DocumentFile
 import com.example.fileupload.data.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import java.io.InputStream
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,7 +47,6 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun App(tokenStore: TokenStore) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
     var token by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -124,7 +125,6 @@ fun TokenScreen(onSave: (String) -> Unit) {
 @Composable
 fun MainScreen(token: String, onLogout: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     val api = remember(token) { ApiClient.create(token) }
 
     var repos by remember { mutableStateOf<List<Repository>>(emptyList()) }
@@ -191,7 +191,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
                             },
                             modifier = Modifier.clickable { selectedRepo = repo }
                         )
-                        Divider()
+                        HorizontalDivider()
                     }
                 }
             }
@@ -205,26 +205,80 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
     }
 }
 
+/** Recursively collect all files under a tree URI. Returns list of (relativePath, contentUri). */
+fun collectFilesRecursive(context: Context, treeUri: Uri): List<Pair<String, Uri>> {
+    val result = mutableListOf<Pair<String, Uri>>()
+    val root = DocumentFile.fromTreeUri(context, treeUri) ?: return result
+
+    fun walk(dir: DocumentFile, relative: String) {
+        for (child in dir.listFiles()) {
+            val name = child.name ?: continue
+            val path = if (relative.isEmpty()) name else "$relative/$name"
+            when {
+                child.isDirectory -> walk(child, path)
+                child.isFile -> result.add(path to child.uri)
+            }
+        }
+    }
+    walk(root, "")
+    return result
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    var path by remember { mutableStateOf("") }
+    var basePath by remember { mutableStateOf("") } // prefix in repo, e.g. "docs" or empty
     var message by remember { mutableStateOf("Upload via Android app") }
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
+
+    // Single file mode
+    var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
     var selectedFileName by remember { mutableStateOf<String?>(null) }
+
+    // Folder mode
+    var selectedFolderUri by remember { mutableStateOf<Uri?>(null) }
+    var folderFileCount by remember { mutableStateOf(0) }
+
     var isUploading by remember { mutableStateOf(false) }
+    var progressText by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        selectedUri = uri
+        selectedFileUri = uri
+        selectedFolderUri = null
+        folderFileCount = 0
         selectedFileName = uri?.lastPathSegment ?: "file"
-        if (path.isBlank() && selectedFileName != null) {
-            path = selectedFileName!!
+        if (basePath.isBlank() && selectedFileName != null) {
+            basePath = selectedFileName!!
+        }
+    }
+
+    val folderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            // Persist permission so we can read later
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) { /* already granted or not needed */ }
+
+            selectedFolderUri = uri
+            selectedFileUri = null
+            selectedFileName = null
+            // Count files
+            scope.launch {
+                val files = withContext(Dispatchers.IO) {
+                    collectFilesRecursive(context, uri)
+                }
+                folderFileCount = files.size
+            }
         }
     }
 
@@ -247,9 +301,16 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                 .padding(16.dp)
         ) {
             OutlinedTextField(
-                value = path,
-                onValueChange = { path = it },
-                label = { Text("Путь в репозитории (например docs/readme.md)") },
+                value = basePath,
+                onValueChange = { basePath = it },
+                label = {
+                    Text(
+                        if (selectedFolderUri != null)
+                            "Базовый путь в репо (например docs/ или пусто)"
+                        else
+                            "Путь файла в репозитории"
+                    )
+                },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -262,85 +323,182 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
 
-            Button(
-                onClick = { filePicker.launch("*/*") },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.AttachFile, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text(selectedFileName ?: "Выбрать файл")
+            Row(Modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { filePicker.launch("*/*") },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.AttachFile, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Файл")
+                }
+                Button(
+                    onClick = { folderPicker.launch(null) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Folder, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Папка")
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            when {
+                selectedFolderUri != null -> {
+                    Text(
+                        "Выбрана папка: $folderFileCount файл(ов)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                selectedFileName != null -> {
+                    Text("Выбран файл: $selectedFileName", style = MaterialTheme.typography.bodyMedium)
+                }
             }
 
             Spacer(Modifier.height(24.dp))
 
             Button(
                 onClick = {
-                    if (path.isBlank() || selectedUri == null) {
-                        Toast.makeText(context, "Укажите путь и выберите файл", Toast.LENGTH_SHORT).show()
+                    val hasFile = selectedFileUri != null
+                    val hasFolder = selectedFolderUri != null
+                    if (!hasFile && !hasFolder) {
+                        Toast.makeText(context, "Выберите файл или папку", Toast.LENGTH_SHORT).show()
                         return@Button
                     }
+                    if (hasFile && basePath.isBlank()) {
+                        Toast.makeText(context, "Укажите путь для файла", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+
                     isUploading = true
                     status = null
+                    progressText = null
+
                     scope.launch {
                         try {
-                            val bytes = context.contentResolver.openInputStream(selectedUri!!)!!.use { it.readBytes() }
-                            val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-
                             val owner = repo.owner.login
                             val repoName = repo.name
 
-                            // Пробуем сначала получить файл, чтобы узнать SHA (для update)
-                            var existingSha: String? = null
-                            try {
-                                val existing = api.getContents(owner, repoName, path)
-                                if (existing.type == "file") {
-                                    existingSha = existing.sha
+                            if (hasFolder) {
+                                // === Folder upload ===
+                                progressText = "Сканирование папки..."
+                                val files = withContext(Dispatchers.IO) {
+                                    collectFilesRecursive(context, selectedFolderUri!!)
                                 }
-                            } catch (_: Exception) {
-                                // файла нет — будем create
-                            }
+                                if (files.isEmpty()) {
+                                    status = "В папке нет файлов"
+                                    return@launch
+                                }
 
-                            val response = if (existingSha != null) {
-                                api.updateFile(
-                                    owner, repoName, path,
-                                    UpdateFileOptions(
-                                        content = base64,
-                                        sha = existingSha,
-                                        message = message.ifBlank { null }
-                                    )
-                                )
-                            } else {
-                                api.createFile(
-                                    owner, repoName, path,
-                                    CreateFileOptions(
-                                        content = base64,
-                                        message = message.ifBlank { null }
-                                    )
-                                )
-                            }
+                                // Build operations (create only; for simplicity we don't check existing SHA)
+                                val operations = mutableListOf<ChangeFileOperation>()
+                                var processed = 0
+                                for ((relPath, uri) in files) {
+                                    processed++
+                                    progressText = "Читаю $processed / ${files.size}: $relPath"
 
-                            if (response.isSuccessful) {
-                                status = "Успешно загружено!\n${response.body()?.content?.htmlUrl ?: ""}"
-                                Toast.makeText(context, "Файл загружен", Toast.LENGTH_SHORT).show()
+                                    val bytes = withContext(Dispatchers.IO) {
+                                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                                    } ?: continue
+
+                                    val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                                    val fullPath = if (basePath.isBlank()) relPath
+                                    else basePath.trimEnd('/') + "/" + relPath
+
+                                    operations.add(
+                                        ChangeFileOperation(
+                                            operation = "create",
+                                            path = fullPath,
+                                            content = base64
+                                        )
+                                    )
+                                }
+
+                                // Upload in batches (API limit safety)
+                                val batchSize = 50
+                                var uploaded = 0
+                                for (batch in operations.chunked(batchSize)) {
+                                    progressText = "Загрузка ${uploaded + 1}–${uploaded + batch.size} / ${operations.size}"
+                                    val response = api.changeFiles(
+                                        owner, repoName,
+                                        ChangeFilesOptions(
+                                            files = batch,
+                                            message = message.ifBlank { "Upload folder (${batch.size} files)" }
+                                        )
+                                    )
+                                    if (!response.isSuccessful) {
+                                        val err = response.errorBody()?.string()
+                                        status = "Ошибка ${response.code()} на файлах ${uploaded + 1}+ : $err"
+                                        return@launch
+                                    }
+                                    uploaded += batch.size
+                                }
+
+                                status = "Успешно загружено $uploaded файл(ов) из папки"
+                                Toast.makeText(context, "Папка загружена ($uploaded файлов)", Toast.LENGTH_LONG).show()
+
                             } else {
-                                val errBody = response.errorBody()?.string()
-                                status = "Ошибка ${response.code()}: $errBody"
+                                // === Single file upload ===
+                                progressText = "Загрузка файла..."
+                                val bytes = withContext(Dispatchers.IO) {
+                                    context.contentResolver.openInputStream(selectedFileUri!!)!!.use { it.readBytes() }
+                                }
+                                val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                                val path = basePath
+
+                                var existingSha: String? = null
+                                try {
+                                    val existing = api.getContents(owner, repoName, path)
+                                    if (existing.type == "file") existingSha = existing.sha
+                                } catch (_: Exception) { }
+
+                                val response = if (existingSha != null) {
+                                    api.updateFile(
+                                        owner, repoName, path,
+                                        UpdateFileOptions(content = base64, sha = existingSha, message = message.ifBlank { null })
+                                    )
+                                } else {
+                                    api.createFile(
+                                        owner, repoName, path,
+                                        CreateFileOptions(content = base64, message = message.ifBlank { null })
+                                    )
+                                }
+
+                                if (response.isSuccessful) {
+                                    status = "Успешно загружено!\n${response.body()?.content?.htmlUrl ?: ""}"
+                                    Toast.makeText(context, "Файл загружен", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    status = "Ошибка ${response.code()}: ${response.errorBody()?.string()}"
+                                }
                             }
                         } catch (e: Exception) {
                             status = "Ошибка: ${e.message}"
                         } finally {
                             isUploading = false
+                            progressText = null
                         }
                     }
                 },
-                enabled = !isUploading && selectedUri != null && path.isNotBlank(),
+                enabled = !isUploading && (selectedFileUri != null || selectedFolderUri != null),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (isUploading) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
                 }
-                Text(if (isUploading) "Загрузка..." else "Загрузить в репозиторий")
+                Text(
+                    when {
+                        isUploading -> "Загрузка..."
+                        selectedFolderUri != null -> "Загрузить папку ($folderFileCount файлов)"
+                        else -> "Загрузить файл"
+                    }
+                )
+            }
+
+            progressText?.let {
+                Spacer(Modifier.height(12.dp))
+                Text(it, style = MaterialTheme.typography.bodySmall)
             }
 
             status?.let {
