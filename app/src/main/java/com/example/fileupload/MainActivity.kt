@@ -16,8 +16,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
@@ -30,6 +35,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,10 +54,14 @@ import com.example.fileupload.data.ApiClient
 import com.example.fileupload.data.ChangeFileOperation
 import com.example.fileupload.data.ChangeFilesOptions
 import com.example.fileupload.data.CodebergApi
+import com.example.fileupload.data.ContentsResponse
 import com.example.fileupload.data.CreateFileOptions
+import com.example.fileupload.data.DeleteFileOptions
 import com.example.fileupload.data.Repository
 import com.example.fileupload.data.TokenStore
 import com.example.fileupload.data.UpdateFileOptions
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -85,10 +95,7 @@ fun App(tokenStore: TokenStore) {
     }
 
     if (isLoading) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }
         return
@@ -236,7 +243,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
             }
         }
     } else {
-        UploadScreen(
+        FileManagerScreen(
             repo = selectedRepo!!,
             api = api,
             onBack = { selectedRepo = null }
@@ -244,7 +251,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
     }
 }
 
-fun collectFilesRecursive(context: Context, treeUri: Uri): List<Pair<String, Uri>> {
+fun collectLocalFilesRecursive(context: Context, treeUri: Uri): List<Pair<String, Uri>> {
     val result = mutableListOf<Pair<String, Uri>>()
     val root = DocumentFile.fromTreeUri(context, treeUri) ?: return result
 
@@ -262,24 +269,89 @@ fun collectFilesRecursive(context: Context, treeUri: Uri): List<Pair<String, Uri
     return result
 }
 
+suspend fun listRepoDir(api: CodebergApi, owner: String, repo: String, path: String): List<ContentsResponse> {
+    return if (path.isBlank()) {
+        api.getRootContents(owner, repo)
+    } else {
+        val body = api.getContentsRaw(owner, repo, path).string()
+        val trimmed = body.trim()
+        if (trimmed.startsWith("[")) {
+            val type = object : TypeToken<List<ContentsResponse>>() {}.type
+            Gson().fromJson(trimmed, type)
+        } else {
+            emptyList()
+        }
+    }
+}
+
+suspend fun collectRepoFilesRecursive(
+    api: CodebergApi,
+    owner: String,
+    repo: String,
+    dirPath: String
+): List<Pair<String, String>> {
+    val result = mutableListOf<Pair<String, String>>()
+    val entries = listRepoDir(api, owner, repo, dirPath)
+    for (e in entries) {
+        val p = e.path ?: continue
+        when (e.type) {
+            "file" -> {
+                val sha = e.sha ?: continue
+                result.add(p to sha)
+            }
+            "dir" -> {
+                result.addAll(collectRepoFilesRecursive(api, owner, repo, p))
+            }
+        }
+    }
+    return result
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
+fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val owner = repo.owner.login
+    val repoName = repo.name
 
-    var basePath by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf("Upload via Android app") }
+    var currentPath by remember { mutableStateOf("") }
+    var entries by remember { mutableStateOf<List<ContentsResponse>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var isBusy by remember { mutableStateOf(false) }
 
+    var showUpload by remember { mutableStateOf(false) }
+    var uploadFileName by remember { mutableStateOf("") }
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
-    var selectedFileName by remember { mutableStateOf<String?>(null) }
-
     var selectedFolderUri by remember { mutableStateOf<Uri?>(null) }
     var folderFileCount by remember { mutableStateOf(0) }
+    var commitMessage by remember { mutableStateOf("Upload via Android app") }
 
-    var isUploading by remember { mutableStateOf(false) }
-    var progressText by remember { mutableStateOf<String?>(null) }
-    var status by remember { mutableStateOf<String?>(null) }
+    var deleteTarget by remember { mutableStateOf<ContentsResponse?>(null) }
+
+    fun reload() {
+        isLoading = true
+        error = null
+        scope.launch {
+            try {
+                entries = withContext(Dispatchers.IO) {
+                    listRepoDir(api, owner, repoName, currentPath)
+                        .sortedWith(compareBy({ it.type != "dir" }, { it.name ?: "" }))
+                }
+            } catch (e: Exception) {
+                error = e.message
+                entries = emptyList()
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(currentPath) {
+        reload()
+    }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -287,9 +359,10 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
         selectedFileUri = uri
         selectedFolderUri = null
         folderFileCount = 0
-        selectedFileName = uri?.lastPathSegment ?: "file"
-        if (basePath.isBlank() && selectedFileName != null) {
-            basePath = selectedFileName!!
+        if (uri != null) {
+            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+            uploadFileName = name
+            showUpload = true
         }
     }
 
@@ -304,277 +377,400 @@ fun UploadScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                 )
             } catch (_: Exception) {
             }
-
             selectedFolderUri = uri
             selectedFileUri = null
-            selectedFileName = null
+            uploadFileName = ""
             scope.launch {
                 val files = withContext(Dispatchers.IO) {
-                    collectFilesRecursive(context, uri)
+                    collectLocalFilesRecursive(context, uri)
                 }
                 folderFileCount = files.size
+                showUpload = true
             }
         }
     }
 
+    val pathLabel = if (currentPath.isBlank()) "/" else "/$currentPath"
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(repo.fullName) },
+                title = {
+                    Column {
+                        Text(repo.fullName, style = MaterialTheme.typography.titleMedium)
+                        Text(pathLabel, style = MaterialTheme.typography.bodySmall)
+                    }
+                },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        if (currentPath.isBlank()) {
+                            onBack()
+                        } else {
+                            currentPath = currentPath.substringBeforeLast('/', missingDelimiterValue = "")
+                        }
+                    }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Назад")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { reload() }, enabled = !isBusy) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Обновить")
+                    }
+                    IconButton(onClick = { filePicker.launch("*/*") }, enabled = !isBusy) {
+                        Icon(Icons.Default.AttachFile, contentDescription = "Файл")
+                    }
+                    IconButton(onClick = { folderPicker.launch(null) }, enabled = !isBusy) {
+                        Icon(Icons.Default.Upload, contentDescription = "Папка")
                     }
                 }
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp)
-        ) {
-            OutlinedTextField(
-                value = basePath,
-                onValueChange = { basePath = it },
-                label = {
-                    Text(
-                        if (selectedFolderUri != null) {
-                            "Базовый путь в репо (например docs/ или пусто)"
-                        } else {
-                            "Путь файла в репозитории"
-                        }
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            OutlinedTextField(
-                value = message,
-                onValueChange = { message = it },
-                label = { Text("Commit message") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = { filePicker.launch("*/*") },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.AttachFile, contentDescription = null)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Файл")
-                }
-                Button(
-                    onClick = { folderPicker.launch(null) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.Folder, contentDescription = null)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Папка")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when {
-                selectedFolderUri != null -> {
-                    Text(
-                        "Выбрана папка: $folderFileCount файл(ов)",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                isLoading -> {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                 }
-                selectedFileName != null -> {
-                    Text(
-                        "Выбран файл: $selectedFileName",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                error != null -> {
+                    Column(
+                        modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(error!!, color = MaterialTheme.colorScheme.error)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(onClick = { reload() }) { Text("Повторить") }
+                    }
                 }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Button(
-                onClick = {
-                    val hasFile = selectedFileUri != null
-                    val hasFolder = selectedFolderUri != null
-                    if (!hasFile && !hasFolder) {
-                        Toast.makeText(context, "Выберите файл или папку", Toast.LENGTH_SHORT).show()
-                        return@Button
-                    }
-                    if (hasFile && basePath.isBlank()) {
-                        Toast.makeText(context, "Укажите путь для файла", Toast.LENGTH_SHORT).show()
-                        return@Button
-                    }
-
-                    isUploading = true
-                    status = null
-                    progressText = null
-
-                    scope.launch {
-                        try {
-                            val owner = repo.owner.login
-                            val repoName = repo.name
-
-                            if (hasFolder) {
-                                progressText = "Сканирование папки..."
-                                val files = withContext(Dispatchers.IO) {
-                                    collectFilesRecursive(context, selectedFolderUri!!)
-                                }
-                                if (files.isEmpty()) {
-                                    status = "В папке нет файлов"
-                                    return@launch
-                                }
-
-                                val operations = mutableListOf<ChangeFileOperation>()
-                                var processed = 0
-                                for ((relPath, uri) in files) {
-                                    processed++
-                                    progressText = "Читаю $processed / ${files.size}: $relPath"
-
-                                    val bytes = withContext(Dispatchers.IO) {
-                                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                                    } ?: continue
-
-                                    val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                                    val fullPath = if (basePath.isBlank()) {
-                                        relPath
-                                    } else {
-                                        basePath.trimEnd('/') + "/" + relPath
-                                    }
-
-                                    operations.add(
-                                        ChangeFileOperation(
-                                            operation = "create",
-                                            path = fullPath,
-                                            content = base64
-                                        )
-                                    )
-                                }
-
-                                val batchSize = 50
-                                var uploaded = 0
-                                for (batch in operations.chunked(batchSize)) {
-                                    progressText =
-                                        "Загрузка ${uploaded + 1}–${uploaded + batch.size} / ${operations.size}"
-                                    val response = api.changeFiles(
-                                        owner,
-                                        repoName,
-                                        ChangeFilesOptions(
-                                            files = batch,
-                                            message = message.ifBlank {
-                                                "Upload folder (${batch.size} files)"
-                                            }
-                                        )
-                                    )
-                                    if (!response.isSuccessful) {
-                                        val err = response.errorBody()?.string()
-                                        status =
-                                            "Ошибка ${response.code()} на файлах ${uploaded + 1}+ : $err"
-                                        return@launch
-                                    }
-                                    uploaded += batch.size
-                                }
-
-                                status = "Успешно загружено $uploaded файл(ов) из папки"
-                                Toast.makeText(
-                                    context,
-                                    "Папка загружена ($uploaded файлов)",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            } else {
-                                progressText = "Загрузка файла..."
-                                val bytes = withContext(Dispatchers.IO) {
-                                    context.contentResolver.openInputStream(selectedFileUri!!)!!
-                                        .use { it.readBytes() }
-                                }
-                                val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                                val path = basePath
-
-                                var existingSha: String? = null
-                                try {
-                                    val existing = api.getContents(owner, repoName, path)
-                                    if (existing.type == "file") {
-                                        existingSha = existing.sha
-                                    }
-                                } catch (_: Exception) {
-                                }
-
-                                val response = if (existingSha != null) {
-                                    api.updateFile(
-                                        owner,
-                                        repoName,
-                                        path,
-                                        UpdateFileOptions(
-                                            content = base64,
-                                            sha = existingSha,
-                                            message = message.ifBlank { null }
-                                        )
-                                    )
-                                } else {
-                                    api.createFile(
-                                        owner,
-                                        repoName,
-                                        path,
-                                        CreateFileOptions(
-                                            content = base64,
-                                            message = message.ifBlank { null }
-                                        )
-                                    )
-                                }
-
-                                if (response.isSuccessful) {
-                                    status =
-                                        "Успешно загружено!\n${response.body()?.content?.htmlUrl ?: ""}"
-                                    Toast.makeText(context, "Файл загружен", Toast.LENGTH_SHORT)
-                                        .show()
-                                } else {
-                                    status =
-                                        "Ошибка ${response.code()}: ${response.errorBody()?.string()}"
-                                }
+                else -> {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        if (entries.isEmpty()) {
+                            item {
+                                Text(
+                                    "Папка пуста",
+                                    modifier = Modifier.padding(24.dp),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
                             }
-                        } catch (e: Exception) {
-                            status = "Ошибка: ${e.message}"
-                        } finally {
-                            isUploading = false
-                            progressText = null
+                        }
+                        items(entries, key = { it.path ?: it.name ?: "" }) { entry ->
+                            val isDir = entry.type == "dir"
+                            ListItem(
+                                headlineContent = { Text(entry.name ?: "?") },
+                                supportingContent = {
+                                    Text(
+                                        if (isDir) "папка" else "${entry.size ?: 0} байт"
+                                    )
+                                },
+                                leadingContent = {
+                                    Icon(
+                                        if (isDir) Icons.Default.Folder else Icons.Default.Description,
+                                        contentDescription = null
+                                    )
+                                },
+                                trailingContent = {
+                                    IconButton(
+                                        onClick = { deleteTarget = entry },
+                                        enabled = !isBusy
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = "Удалить",
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.clickable(enabled = isDir && !isBusy) {
+                                    if (isDir) {
+                                        currentPath = entry.path ?: ""
+                                    }
+                                }
+                            )
+                            Divider()
                         }
                     }
-                },
-                enabled = !isUploading && (selectedFileUri != null || selectedFolderUri != null),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (isUploading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
                 }
-                Text(
-                    when {
-                        isUploading -> "Загрузка..."
-                        selectedFolderUri != null -> "Загрузить папку ($folderFileCount файлов)"
-                        else -> "Загрузить файл"
-                    }
-                )
-            }
-
-            progressText?.let {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(it, style = MaterialTheme.typography.bodySmall)
             }
 
             status?.let {
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(it, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    it,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            if (isBusy) {
+                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             }
         }
+    }
+
+    deleteTarget?.let { target ->
+        val isDir = target.type == "dir"
+        AlertDialog(
+            onDismissRequest = { if (!isBusy) deleteTarget = null },
+            title = { Text(if (isDir) "Удалить папку?" else "Удалить файл?") },
+            text = {
+                Text(
+                    if (isDir) {
+                        "Папка «${target.name}» и все файлы внутри будут удалены."
+                    } else {
+                        "Файл «${target.name}» будет удалён из репозитория."
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isBusy = true
+                        status = null
+                        scope.launch {
+                            try {
+                                if (isDir) {
+                                    status = "Сбор файлов папки..."
+                                    val files = withContext(Dispatchers.IO) {
+                                        collectRepoFilesRecursive(api, owner, repoName, target.path ?: "")
+                                    }
+                                    if (files.isEmpty()) {
+                                        status = "Папка уже пуста"
+                                    } else {
+                                        val ops = files.map { (path, sha) ->
+                                            ChangeFileOperation(
+                                                operation = "delete",
+                                                path = path,
+                                                sha = sha
+                                            )
+                                        }
+                                        var deleted = 0
+                                        for (batch in ops.chunked(50)) {
+                                            status = "Удаление ${deleted + 1}–${deleted + batch.size} / ${ops.size}"
+                                            val resp = api.changeFiles(
+                                                owner,
+                                                repoName,
+                                                ChangeFilesOptions(
+                                                    files = batch,
+                                                    message = "Delete folder ${target.path}"
+                                                )
+                                            )
+                                            if (!resp.isSuccessful) {
+                                                status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                                return@launch
+                                            }
+                                            deleted += batch.size
+                                        }
+                                        status = "Удалено $deleted файл(ов)"
+                                        Toast.makeText(context, "Папка удалена", Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    val sha = target.sha
+                                    if (sha == null) {
+                                        status = "Нет SHA файла"
+                                        return@launch
+                                    }
+                                    val resp = api.deleteFile(
+                                        owner,
+                                        repoName,
+                                        target.path ?: target.name ?: "",
+                                        DeleteFileOptions(
+                                            sha = sha,
+                                            message = "Delete ${target.name}"
+                                        )
+                                    )
+                                    if (resp.isSuccessful) {
+                                        status = "Файл удалён"
+                                        Toast.makeText(context, "Удалено", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                    }
+                                }
+                                deleteTarget = null
+                                reload()
+                            } catch (e: Exception) {
+                                status = "Ошибка: ${e.message}"
+                            } finally {
+                                isBusy = false
+                            }
+                        }
+                    },
+                    enabled = !isBusy
+                ) {
+                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }, enabled = !isBusy) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    if (showUpload) {
+        val isFolder = selectedFolderUri != null
+        AlertDialog(
+            onDismissRequest = {
+                if (!isBusy) {
+                    showUpload = false
+                    selectedFileUri = null
+                    selectedFolderUri = null
+                }
+            },
+            title = { Text(if (isFolder) "Загрузить папку" else "Загрузить файл") },
+            text = {
+                Column {
+                    Text("Текущая папка в репо: $pathLabel")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (isFolder) {
+                        Text("Файлов: $folderFileCount")
+                        Text("Структура подпапок сохранится относительно $pathLabel")
+                    } else {
+                        OutlinedTextField(
+                            value = uploadFileName,
+                            onValueChange = { uploadFileName = it },
+                            label = { Text("Имя файла в репозитории") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = commitMessage,
+                        onValueChange = { commitMessage = it },
+                        label = { Text("Commit message") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isBusy = true
+                        status = null
+                        scope.launch {
+                            try {
+                                if (isFolder && selectedFolderUri != null) {
+                                    status = "Сканирование..."
+                                    val files = withContext(Dispatchers.IO) {
+                                        collectLocalFilesRecursive(context, selectedFolderUri!!)
+                                    }
+                                    if (files.isEmpty()) {
+                                        status = "В папке нет файлов"
+                                        return@launch
+                                    }
+                                    val operations = mutableListOf<ChangeFileOperation>()
+                                    var n = 0
+                                    for ((rel, uri) in files) {
+                                        n++
+                                        status = "Читаю $n / ${files.size}"
+                                        val bytes = withContext(Dispatchers.IO) {
+                                            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                                        } ?: continue
+                                        val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                                        val full = if (currentPath.isBlank()) rel
+                                        else currentPath.trimEnd('/') + "/" + rel
+                                        operations.add(
+                                            ChangeFileOperation(
+                                                operation = "create",
+                                                path = full,
+                                                content = b64
+                                            )
+                                        )
+                                    }
+                                    var uploaded = 0
+                                    for (batch in operations.chunked(50)) {
+                                        status = "Загрузка ${uploaded + 1}–${uploaded + batch.size} / ${operations.size}"
+                                        val resp = api.changeFiles(
+                                            owner,
+                                            repoName,
+                                            ChangeFilesOptions(
+                                                files = batch,
+                                                message = commitMessage.ifBlank { "Upload folder" }
+                                            )
+                                        )
+                                        if (!resp.isSuccessful) {
+                                            status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                            return@launch
+                                        }
+                                        uploaded += batch.size
+                                    }
+                                    status = "Загружено $uploaded файл(ов)"
+                                    Toast.makeText(context, "Готово", Toast.LENGTH_SHORT).show()
+                                } else if (selectedFileUri != null) {
+                                    val name = uploadFileName.ifBlank {
+                                        selectedFileUri!!.lastPathSegment?.substringAfterLast('/') ?: "file"
+                                    }
+                                    val fullPath = if (currentPath.isBlank()) name
+                                    else currentPath.trimEnd('/') + "/" + name
+                                    status = "Загрузка $fullPath..."
+                                    val bytes = withContext(Dispatchers.IO) {
+                                        context.contentResolver.openInputStream(selectedFileUri!!)!!
+                                            .use { it.readBytes() }
+                                    }
+                                    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+                                    var existingSha: String? = null
+                                    try {
+                                        val existing = api.getContents(owner, repoName, fullPath)
+                                        if (existing.type == "file") existingSha = existing.sha
+                                    } catch (_: Exception) {
+                                    }
+
+                                    val resp = if (existingSha != null) {
+                                        api.updateFile(
+                                            owner, repoName, fullPath,
+                                            UpdateFileOptions(
+                                                content = b64,
+                                                sha = existingSha,
+                                                message = commitMessage.ifBlank { null }
+                                            )
+                                        )
+                                    } else {
+                                        api.createFile(
+                                            owner, repoName, fullPath,
+                                            CreateFileOptions(
+                                                content = b64,
+                                                message = commitMessage.ifBlank { null }
+                                            )
+                                        )
+                                    }
+                                    if (resp.isSuccessful) {
+                                        status = "Файл загружен: $fullPath"
+                                        Toast.makeText(context, "Загружено", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                    }
+                                }
+                                showUpload = false
+                                selectedFileUri = null
+                                selectedFolderUri = null
+                                reload()
+                            } catch (e: Exception) {
+                                status = "Ошибка: ${e.message}"
+                            } finally {
+                                isBusy = false
+                            }
+                        }
+                    },
+                    enabled = !isBusy && (selectedFileUri != null || (selectedFolderUri != null && folderFileCount > 0))
+                ) {
+                    Text("Загрузить")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showUpload = false
+                        selectedFileUri = null
+                        selectedFolderUri = null
+                    },
+                    enabled = !isBusy
+                ) {
+                    Text("Отмена")
+                }
+            }
+        )
     }
 }
