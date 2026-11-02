@@ -39,6 +39,14 @@ interface CodebergApi {
         @Path("filepath", encoded = true) filepath: String,
         @Body body: UpdateFileOptions
     ): Response<FileResponse>
+
+    /** Create / update / delete multiple files in one commit */
+    @POST("repos/{owner}/{repo}/contents")
+    suspend fun changeFiles(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Body body: ChangeFilesOptions
+    ): Response<FilesResponse>
 }
 
 object ApiClient {
@@ -46,7 +54,7 @@ object ApiClient {
 
     fun create(token: String): CodebergApi {
         val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
+            level = HttpLoggingInterceptor.Level.BASIC
         }
 
         val client = OkHttpClient.Builder()
@@ -59,8 +67,8 @@ object ApiClient {
             }
             .addInterceptor(logging)
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
             .build()
 
         return Retrofit.Builder()
