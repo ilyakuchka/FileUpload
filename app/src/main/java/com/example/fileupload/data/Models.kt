@@ -29,8 +29,26 @@ data class UpdateFileOptions(
     val branch: String? = null
 )
 
+data class ChangeFileOperation(
+    val operation: String, // "create", "update", "delete"
+    val path: String,
+    val content: String? = null, // base64, for create/update
+    val sha: String? = null // required for update/delete
+)
+
+data class ChangeFilesOptions(
+    val files: List<ChangeFileOperation>,
+    val message: String? = null,
+    val branch: String? = null
+)
+
 data class FileResponse(
     val content: ContentInfo?,
+    val commit: CommitInfo?
+)
+
+data class FilesResponse(
+    val files: List<ContentInfo>?,
     val commit: CommitInfo?
 )
 
