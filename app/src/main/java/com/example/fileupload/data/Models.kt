@@ -17,23 +17,29 @@ data class Owner(
 )
 
 data class CreateFileOptions(
-    val content: String, // base64
+    val content: String,
     val message: String? = null,
     val branch: String? = null
 )
 
 data class UpdateFileOptions(
-    val content: String, // base64
+    val content: String,
+    val sha: String,
+    val message: String? = null,
+    val branch: String? = null
+)
+
+data class DeleteFileOptions(
     val sha: String,
     val message: String? = null,
     val branch: String? = null
 )
 
 data class ChangeFileOperation(
-    val operation: String, // "create", "update", "delete"
+    val operation: String,
     val path: String,
-    val content: String? = null, // base64, for create/update
-    val sha: String? = null // required for update/delete
+    val content: String? = null,
+    val sha: String? = null
 )
 
 data class ChangeFilesOptions(
@@ -64,12 +70,16 @@ data class CommitInfo(
     val message: String?
 )
 
+/** Single entry or element of directory listing */
 data class ContentsResponse(
-    val name: String?,
-    val path: String?,
-    val sha: String?,
-    val type: String?, // file or dir
-    val content: String? // base64 if file
+    val name: String? = null,
+    val path: String? = null,
+    val sha: String? = null,
+    val type: String? = null,
+    val size: Long? = null,
+    val content: String? = null,
+    @SerializedName("download_url") val downloadUrl: String? = null,
+    @SerializedName("html_url") val htmlUrl: String? = null
 )
 
 data class ApiError(
