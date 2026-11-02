@@ -175,6 +175,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
             repos = api.getUserRepos()
             isLoadingRepos = false
         } catch (e: Exception) {
+            ErrorLogger.e("Загрузка списка репозиториев", e)
             error = e.message ?: "Ошибка загрузки репозиториев"
             isLoadingRepos = false
         }
@@ -218,6 +219,7 @@ fun MainScreen(token: String, onLogout: () -> Unit) {
                             try {
                                 repos = api.getUserRepos()
                             } catch (e: Exception) {
+                                ErrorLogger.e("Повтор загрузки репозиториев", e)
                                 error = e.message
                             } finally {
                                 isLoadingRepos = false
@@ -307,6 +309,20 @@ suspend fun collectRepoFilesRecursive(
     return result
 }
 
+fun formatApiError(code: Int, body: String?): String {
+    val msg = try {
+        val json = com.google.gson.JsonParser.parseString(body ?: "").asJsonObject
+        json.get("message")?.asString
+    } catch (_: Exception) {
+        null
+    }
+    return when {
+        !msg.isNullOrBlank() -> "Ошибка $code: $msg"
+        !body.isNullOrBlank() -> "Ошибка $code: ${body.take(300)}"
+        else -> "Ошибка HTTP $code"
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
@@ -341,6 +357,7 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                         .sortedWith(compareBy({ it.type != "dir" }, { it.name ?: "" }))
                 }
             } catch (e: Exception) {
+                ErrorLogger.e("Список каталога /$currentPath", e)
                 error = e.message
                 entries = emptyList()
             } finally {
@@ -555,7 +572,9 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                                 )
                                             )
                                             if (!resp.isSuccessful) {
-                                                status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                                val body = resp.errorBody()?.string()
+                                                ErrorLogger.e("Удаление папки ${target.path}", resp.code(), body)
+                                                status = formatApiError(resp.code(), body)
                                                 return@launch
                                             }
                                             deleted += batch.size
@@ -582,12 +601,15 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                         status = "Файл удалён"
                                         Toast.makeText(context, "Удалено", Toast.LENGTH_SHORT).show()
                                     } else {
-                                        status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                        val body = resp.errorBody()?.string()
+                                        ErrorLogger.e("Удаление файла ${target.name}", resp.code(), body)
+                                        status = formatApiError(resp.code(), body)
                                     }
                                 }
                                 deleteTarget = null
                                 reload()
                             } catch (e: Exception) {
+                                ErrorLogger.e("Исключение при удалении", e)
                                 status = "Ошибка: ${e.message}"
                             } finally {
                                 isBusy = false
@@ -664,22 +686,42 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                     var n = 0
                                     for ((rel, uri) in files) {
                                         n++
-                                        status = "Читаю $n / ${files.size}"
+                                        status = "Подготовка $n / ${files.size}"
                                         val bytes = withContext(Dispatchers.IO) {
                                             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                                         } ?: continue
                                         val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
                                         val full = if (currentPath.isBlank()) rel
                                         else currentPath.trimEnd('/') + "/" + rel
-                                        operations.add(
-                                            ChangeFileOperation(
-                                                operation = "create",
-                                                path = full,
-                                                content = b64
+
+                                        var existingSha: String? = null
+                                        try {
+                                            val existing = api.getContents(owner, repoName, full)
+                                            if (existing.type == "file") existingSha = existing.sha
+                                        } catch (_: Exception) {
+                                        }
+
+                                        if (existingSha != null) {
+                                            operations.add(
+                                                ChangeFileOperation(
+                                                    operation = "update",
+                                                    path = full,
+                                                    content = b64,
+                                                    sha = existingSha
+                                                )
                                             )
-                                        )
+                                        } else {
+                                            operations.add(
+                                                ChangeFileOperation(
+                                                    operation = "create",
+                                                    path = full,
+                                                    content = b64
+                                                )
+                                            )
+                                        }
                                     }
                                     var uploaded = 0
+                                    val failed = mutableListOf<String>()
                                     for (batch in operations.chunked(50)) {
                                         status = "Загрузка ${uploaded + 1}–${uploaded + batch.size} / ${operations.size}"
                                         val resp = api.changeFiles(
@@ -691,13 +733,44 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                             )
                                         )
                                         if (!resp.isSuccessful) {
-                                            status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
-                                            return@launch
+                                            val body = resp.errorBody()?.string()
+                                            ErrorLogger.e("Загрузка папки batch ${uploaded + 1}", resp.code(), body)
+                                            for (op in batch) {
+                                                val single = api.changeFiles(
+                                                    owner,
+                                                    repoName,
+                                                    ChangeFilesOptions(
+                                                        files = listOf(op),
+                                                        message = commitMessage.ifBlank { "Upload ${op.path}" }
+                                                    )
+                                                )
+                                                if (single.isSuccessful) {
+                                                    uploaded++
+                                                } else {
+                                                    val err = single.errorBody()?.string()
+                                                    ErrorLogger.e("Файл ${op.path}", single.code(), err)
+                                                    failed.add("${op.path}: HTTP ${single.code()}")
+                                                }
+                                            }
+                                        } else {
+                                            uploaded += batch.size
                                         }
-                                        uploaded += batch.size
                                     }
-                                    status = "Загружено $uploaded файл(ов)"
-                                    Toast.makeText(context, "Готово", Toast.LENGTH_SHORT).show()
+                                    if (failed.isEmpty()) {
+                                        status = "Загружено $uploaded файл(ов)"
+                                        Toast.makeText(context, "Готово", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        status = "Загружено $uploaded, ошибок ${failed.size}"
+                                        ErrorLogger.e(
+                                            "Итог: успех=$uploaded, ошибки=${failed.size}\n" +
+                                                failed.take(20).joinToString("\n")
+                                        )
+                                        Toast.makeText(
+                                            context,
+                                            "Частично: ${failed.size} ошибок",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
                                 } else if (selectedFileUri != null) {
                                     val name = uploadFileName.ifBlank {
                                         selectedFileUri!!.lastPathSegment?.substringAfterLast('/') ?: "file"
@@ -740,7 +813,9 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                         status = "Файл загружен: $fullPath"
                                         Toast.makeText(context, "Загружено", Toast.LENGTH_SHORT).show()
                                     } else {
-                                        status = "Ошибка ${resp.code()}: ${resp.errorBody()?.string()}"
+                                        val body = resp.errorBody()?.string()
+                                        ErrorLogger.e("Загрузка файла $fullPath", resp.code(), body)
+                                        status = formatApiError(resp.code(), body)
                                     }
                                 }
                                 showUpload = false
@@ -748,6 +823,7 @@ fun FileManagerScreen(repo: Repository, api: CodebergApi, onBack: () -> Unit) {
                                 selectedFolderUri = null
                                 reload()
                             } catch (e: Exception) {
+                                ErrorLogger.e("Исключение при загрузке", e)
                                 status = "Ошибка: ${e.message}"
                             } finally {
                                 isBusy = false
