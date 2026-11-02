@@ -61,6 +61,7 @@ import com.example.fileupload.data.Repository
 import com.example.fileupload.data.TokenStore
 import com.example.fileupload.data.UpdateFileOptions
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -309,10 +310,11 @@ suspend fun collectRepoFilesRecursive(
     return result
 }
 
+@Suppress("DEPRECATION")
 fun formatApiError(code: Int, body: String?): String {
     val msg = try {
-        val json = com.google.gson.JsonParser.parseString(body ?: "").asJsonObject
-        json.get("message")?.asString
+        val el = JsonParser().parse(body ?: "")
+        if (el.isJsonObject) el.asJsonObject.get("message")?.asString else null
     } catch (_: Exception) {
         null
     }
